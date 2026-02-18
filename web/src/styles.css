@@ -146,6 +146,18 @@ th {
   margin-bottom: 0.75rem;
 }
 
+.section-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
 .section-card__kicker {
   color: var(--muted);
   font-size: 0.78rem;

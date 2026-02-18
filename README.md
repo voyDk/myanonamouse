@@ -20,6 +20,8 @@ Run the UI:
 bun run dev
 ```
 
+When running the Vite dev server, the UI fetches live data from `/api/snapshot`, which executes the Playwright automation script in snapshot mode.
+
 Other tasks:
 
 ```bash
@@ -49,6 +51,7 @@ Browser automation for MyAnonamouse spending rules remains available:
 bun run mam:check   # dry-run
 bun run mam:apply   # real spend
 bun run mam:headed  # visible browser
+bun run mam:snapshot # JSON snapshot used by the React UI
 ```
 
 Order used by the script:

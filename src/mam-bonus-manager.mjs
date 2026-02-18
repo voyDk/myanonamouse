@@ -5,7 +5,7 @@ import process from 'node:process';
 import dotenv from 'dotenv';
 import { chromium } from 'playwright';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const DEFAULT_LOGIN_URL = 'https://www.myanonamouse.net/login.php?returnto=%2Fstore.php';
 const DEFAULT_STORE_URL = 'https://www.myanonamouse.net/store.php';
@@ -47,12 +47,17 @@ function randomInt(min, max) {
 
 function buildConfig() {
   const args = new Set(process.argv.slice(2));
-  const apply = args.has('--apply') || parseBool(process.env.MAM_APPLY, false);
+  const snapshotOnly = args.has('--snapshot') || parseBool(process.env.MAM_SNAPSHOT_ONLY, false);
+  const jsonOutput = args.has('--json') || parseBool(process.env.MAM_JSON_OUTPUT, false);
+  const applyRequested = args.has('--apply') || parseBool(process.env.MAM_APPLY, false);
+  const apply = snapshotOnly ? false : applyRequested;
   const headed = args.has('--headed') || parseBool(process.env.MAM_HEADLESS, false) === false;
 
   return {
     email: process.env.MAM_EMAIL || process.env.MAM_USERNAME || '',
     password: process.env.MAM_PASSWORD || '',
+    snapshotOnly,
+    jsonOutput,
     loginUrl: process.env.MAM_LOGIN_URL || DEFAULT_LOGIN_URL,
     storeUrl: process.env.MAM_STORE_URL || DEFAULT_STORE_URL,
     apply,
@@ -188,10 +193,19 @@ async function ensureLoggedIn(page, config) {
   await waitForPageToSettle(page);
   await humanPause(page, config, 300, 1000);
 
+  const bodyText = (await page.locator('body').innerText()).toLowerCase();
   const stillOnLogin = page.url().includes('/login.php') || (await page.locator("input[name='password']").count()) > 0;
-  if (stillOnLogin) {
-    const bodyText = (await page.locator('body').innerText()).toLowerCase();
-    const authHints = ['not logged in', 'problem logging in', 'cookies enabled', 'failed login'];
+  const likelyAuthFailure = stillOnLogin || page.url().includes('/takelogin.php') || bodyText.includes('not logged in!');
+  if (likelyAuthFailure) {
+    const authHints = [
+      'login locked',
+      'maximum login attempts',
+      'unable to log in',
+      'not logged in',
+      'problem logging in',
+      'cookies enabled',
+      'failed login',
+    ];
     const matchedHint = authHints.find((hint) => bodyText.includes(hint));
     if (matchedHint) {
       throw new Error(`Login failed or was blocked by site checks (hint: ${matchedHint}).`);
@@ -336,6 +350,69 @@ async function getMillionaireStatus(page, config) {
     maxDonateToday,
     donateButtonAvailable: (await donateButton.count()) > 0,
     donationHistory: await readDonationHistory(page),
+  };
+}
+
+function parseDateToIso(input) {
+  const parsed = new Date(input);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed.toISOString();
+}
+
+function mapDonationHistory(donationHistory) {
+  return donationHistory
+    .map((entry) => {
+      const amount = numberFromText(entry.amount);
+      const dateIso = parseDateToIso(entry.date) ?? entry.date;
+      if (amount === null) {
+        return null;
+      }
+      return {
+        dateIso,
+        amount,
+      };
+    })
+    .filter((entry) => entry !== null);
+}
+
+async function readVipWeeksRemaining(page) {
+  const bodyText = await getBodyText(page);
+  const patterns = [
+    /vip expires in\s+([0-9]+(?:\.[0-9]+)?)\s+weeks/i,
+    /([0-9]+(?:\.[0-9]+)?)\s+weeks?\s+of vip status remaining/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = bodyText.match(pattern);
+    if (!match) {
+      continue;
+    }
+    const parsed = Number.parseFloat(match[1]);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return 0;
+}
+
+async function buildLiveSnapshot(page, config, currentBonus) {
+  await openStore(page, config);
+  const vipWeeksRemaining = await readVipWeeksRemaining(page);
+  const millionaireStatus = await getMillionaireStatus(page, config);
+
+  return {
+    bonusPoints: currentBonus,
+    threshold: config.bonusThreshold,
+    target: config.bonusTarget,
+    maxCap: config.bonusCap,
+    donatedToday: millionaireStatus.alreadyDonatedToday,
+    maxDailyDonation: millionaireStatus.maxDonateToday ?? config.donatePoints,
+    vipWeeksRemaining,
+    checkedAtIso: new Date().toISOString(),
+    donationHistory: mapDonationHistory(millionaireStatus.donationHistory),
   };
 }
 
@@ -903,7 +980,12 @@ async function saveDebugArtifacts(page, config, label, forms = []) {
   return { dir, htmlPath, screenshotPath, formsPath };
 }
 
-function printSummary(summary) {
+function printSummary(summary, config) {
+  if (config.jsonOutput) {
+    console.log(JSON.stringify(summary));
+    return;
+  }
+
   console.log('\nRun summary');
   console.log(JSON.stringify(summary, null, 2));
 }
@@ -949,12 +1031,18 @@ async function run() {
       throw new Error('Could not parse current bonus points from the store page.');
     }
 
+    if (config.snapshotOnly) {
+      const snapshot = await buildLiveSnapshot(page, config, before.value);
+      printSummary(snapshot, config);
+      return;
+    }
+
     const shouldSpend = before.value >= config.bonusThreshold;
     summary.shouldSpend = shouldSpend;
 
     if (!shouldSpend) {
       summary.note = `Bonus points (${before.value}) are below threshold (${config.bonusThreshold}); no spending planned.`;
-      printSummary(summary);
+      printSummary(summary, config);
       return;
     }
 
@@ -1019,7 +1107,7 @@ async function run() {
     const allForms = await discoverForms(page);
     summary.debug = await saveDebugArtifacts(page, config, config.apply ? 'apply-run' : 'dry-run', allForms);
 
-    printSummary(summary);
+    printSummary(summary, config);
   } finally {
     await context.close();
     await browser.close();
@@ -1027,6 +1115,10 @@ async function run() {
 }
 
 run().catch((error) => {
-  console.error(`\nRun failed: ${error.message}`);
+  if (process.argv.includes('--json')) {
+    console.error(JSON.stringify({ error: error.message }));
+  } else {
+    console.error(`\nRun failed: ${error.message}`);
+  }
   process.exitCode = 1;
 });

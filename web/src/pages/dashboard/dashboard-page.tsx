@@ -43,7 +43,14 @@ export function DashboardPage() {
       <SectionCard
         kicker="Donation Log"
         title="Millionaire's Club History"
-        actions={<span className="mono">Daily Max {formatPoints(snapshot.maxDailyDonation)}</span>}
+        actions={
+          <div className="section-actions">
+            <span className="mono">Daily Max {formatPoints(snapshot.maxDailyDonation)}</span>
+            <button className="btn" onClick={refresh} type="button">
+              Refresh
+            </button>
+          </div>
+        }
       >
         <div className="table-wrap">
           <table>

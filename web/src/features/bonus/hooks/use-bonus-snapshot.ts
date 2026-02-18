@@ -23,7 +23,7 @@ export function useBonusSnapshot() {
 
     setState({ status: 'loading', data: null, error: null });
 
-    void getBonusSnapshot()
+    void getBonusSnapshot({ forceRefresh: refreshKey > 0 })
       .then((snapshot) => {
         if (!active) {
           return;
