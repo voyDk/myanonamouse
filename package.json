@@ -11,7 +11,8 @@
     "mam:check": "node src/mam-bonus-manager.mjs",
     "mam:apply": "node src/mam-bonus-manager.mjs --apply",
     "mam:headed": "node src/mam-bonus-manager.mjs --headed",
-    "mam:snapshot": "node src/mam-bonus-manager.mjs --snapshot --json"
+    "mam:snapshot": "node src/mam-bonus-manager.mjs --snapshot --json",
+    "mam:cli": "node src/mam-bonus-manager.mjs"
   },
   "repository": {
     "type": "git",

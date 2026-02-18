@@ -54,6 +54,18 @@ bun run mam:headed  # visible browser
 bun run mam:snapshot # JSON snapshot used by the React UI
 ```
 
+CLI control for direct operations:
+
+```bash
+bun run mam:cli -- --help
+bun run mam:cli -- status --json
+bun run mam:cli -- donate --amount 2000 --apply
+bun run mam:cli -- vip --weeks 8 --apply
+bun run mam:cli -- upload --gb 20 --apply
+```
+
+CLI commands are dry-run by default. Add `--apply` (or `--yes`) to execute.
+
 Order used by the script:
 1. Millionaire's Club donation
 2. VIP extension

@@ -29,6 +29,11 @@ function parseIntStrict(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseNumberStrict(value, fallback) {
+  const parsed = Number(String(value ?? ''));
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function numberFromText(value) {
   const digits = String(value ?? '').replace(/[^0-9]/g, '');
   if (!digits) {
@@ -45,17 +50,50 @@ function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+function getFlagValue(args, ...flags) {
+  for (const flag of flags) {
+    const idx = args.indexOf(flag);
+    if (idx >= 0 && idx + 1 < args.length) {
+      return args[idx + 1];
+    }
+  }
+  return undefined;
+}
+
+function parseCliArgs(rawArgs) {
+  let command = 'auto';
+  const args = [...rawArgs];
+
+  if (args.length > 0 && !args[0].startsWith('-')) {
+    command = args[0].toLowerCase();
+    args.shift();
+  }
+
+  return {
+    command,
+    args,
+  };
+}
+
 function buildConfig() {
-  const args = new Set(process.argv.slice(2));
-  const snapshotOnly = args.has('--snapshot') || parseBool(process.env.MAM_SNAPSHOT_ONLY, false);
+  const cli = parseCliArgs(process.argv.slice(2));
+  const args = new Set(cli.args);
+  const snapshotOnly = cli.command === 'snapshot' || cli.command === 'status' || args.has('--snapshot') || parseBool(process.env.MAM_SNAPSHOT_ONLY, false);
   const jsonOutput = args.has('--json') || parseBool(process.env.MAM_JSON_OUTPUT, false);
-  const applyRequested = args.has('--apply') || parseBool(process.env.MAM_APPLY, false);
+  const applyRequested = args.has('--apply') || args.has('--yes') || parseBool(process.env.MAM_APPLY, false);
   const apply = snapshotOnly ? false : applyRequested;
   const headed = args.has('--headed') || parseBool(process.env.MAM_HEADLESS, false) === false;
+
+  const donationAmountArg = getFlagValue(cli.args, '--amount', '-a');
+  const vipWeeksArg = getFlagValue(cli.args, '--weeks', '-w');
+  const uploadGbArg = getFlagValue(cli.args, '--gb', '-g');
 
   return {
     email: process.env.MAM_EMAIL || process.env.MAM_USERNAME || '',
     password: process.env.MAM_PASSWORD || '',
+    command: cli.command,
+    help: args.has('--help') || args.has('-h'),
+    rawArgs: cli.args,
     snapshotOnly,
     jsonOutput,
     loginUrl: process.env.MAM_LOGIN_URL || DEFAULT_LOGIN_URL,
@@ -77,11 +115,44 @@ function buildConfig() {
     preClickHoverMinMs: parseIntStrict(process.env.MAM_PRE_CLICK_HOVER_MIN_MS, 140),
     preClickHoverMaxMs: parseIntStrict(process.env.MAM_PRE_CLICK_HOVER_MAX_MS, 420),
     slowMoMs: parseIntStrict(process.env.MAM_SLOW_MO_MS, 45),
+    cliDonateAmount: parseIntStrict(donationAmountArg ?? process.env.MAM_CLI_DONATION_AMOUNT, 2000),
+    cliVipWeeks: (vipWeeksArg ?? process.env.MAM_CLI_VIP_WEEKS ?? 'max').toLowerCase(),
+    cliUploadGb: (uploadGbArg ?? process.env.MAM_CLI_UPLOAD_GB ?? 'max').toLowerCase(),
+    cliUploadGbNumber: parseNumberStrict(uploadGbArg ?? process.env.MAM_CLI_UPLOAD_GB, Number.NaN),
   };
 }
 
 function actionResult(name, status, extra = {}) {
   return { name, status, ...extra };
+}
+
+function printUsage() {
+  console.log(`MyAnonamouse CLI
+
+Usage:
+  node src/mam-bonus-manager.mjs <command> [options]
+
+Commands:
+  auto                  Run threshold-based automation flow.
+  status|snapshot       Fetch account snapshot only (no spending).
+  donate                Donate to Millionaire's Club.
+  vip                   Buy VIP time.
+  upload                Buy upload credit.
+
+Options:
+  --apply, --yes        Apply action. Without this flag, command is dry-run.
+  --json                Output compact JSON.
+  --headed              Show browser window.
+  --amount, -a <int>    Donation points for donate command (default: 2000).
+  --weeks, -w <value>   VIP duration: 4|8|12|max (default: max).
+  --gb, -g <value>      Upload amount: 1|2.5|5|20|50|100|max (default: max).
+  --help, -h            Show this help.
+
+Examples:
+  bun run mam:cli -- status --json
+  bun run mam:cli -- donate --amount 2000 --apply
+  bun run mam:cli -- vip --weeks 8 --apply
+  bun run mam:cli -- upload --gb 20 --apply`);
 }
 
 async function humanPause(page, config, minMs = null, maxMs = null) {
@@ -533,6 +604,25 @@ const uploadPurchaseOptions = [
   { label: '1 GB', cost: 500 },
 ];
 
+const vipButtonByChoice = {
+  '4': '4 Weeks',
+  '8': '8 Weeks',
+  '12': '12 Weeks',
+  max: 'Max me out!',
+};
+
+const uploadButtonByChoice = {
+  '1': '1 GB',
+  '2.5': '2.5 GB',
+  '5': '5 GB',
+  '20': '20 GB',
+  '50': '50 GB',
+  '100': '100 GB',
+  max: 'All I can afford',
+  all: 'All I can afford',
+  affordable: 'All I can afford',
+};
+
 function planUploadPurchases(remainingPoints) {
   let rem = Math.max(0, remainingPoints);
   const plan = [];
@@ -693,6 +783,72 @@ async function performUploadSpend(page, config, apply, remainingToSpend) {
   return actionResult('buy_upload_credit', 'applied', {
     successful,
     attempts,
+  });
+}
+
+function resolveVipLabel(choice) {
+  return vipButtonByChoice[choice] ?? null;
+}
+
+function resolveUploadLabel(choice, choiceNumber) {
+  const mapped = uploadButtonByChoice[choice];
+  if (mapped) {
+    return mapped;
+  }
+
+  if (Number.isFinite(choiceNumber)) {
+    const normalized = String(choiceNumber);
+    return uploadButtonByChoice[normalized] ?? null;
+  }
+
+  return null;
+}
+
+async function performDonateDirect(page, config) {
+  const requestedAmount = Math.max(100, config.cliDonateAmount);
+  const donateConfig = { ...config, donatePoints: requestedAmount };
+  return performMillionaireDonation(page, donateConfig, config.apply, requestedAmount);
+}
+
+async function performVipDirect(page, config) {
+  const label = resolveVipLabel(config.cliVipWeeks);
+  if (!label) {
+    return actionResult('vip', 'failed', {
+      reason: `Invalid --weeks value '${config.cliVipWeeks}'. Use 4, 8, 12, or max.`,
+    });
+  }
+
+  await openStore(page, config);
+  const result = await triggerStoreBonusButton(page, config, '.vipStatusContent', label, config.apply);
+  if (!result.ok) {
+    return actionResult('vip', 'failed', { requested: config.cliVipWeeks, label, response: result });
+  }
+
+  return actionResult('vip', config.apply ? 'applied' : 'planned', {
+    requested: config.cliVipWeeks,
+    label,
+    response: result,
+  });
+}
+
+async function performUploadDirect(page, config) {
+  const label = resolveUploadLabel(config.cliUploadGb, config.cliUploadGbNumber);
+  if (!label) {
+    return actionResult('upload', 'failed', {
+      reason: `Invalid --gb value '${config.cliUploadGb}'. Use 1, 2.5, 5, 20, 50, 100, or max.`,
+    });
+  }
+
+  await openStore(page, config);
+  const result = await triggerStoreBonusButton(page, config, '.uploadCreditContent', label, config.apply);
+  if (!result.ok) {
+    return actionResult('upload', 'failed', { requested: config.cliUploadGb, label, response: result });
+  }
+
+  return actionResult('upload', config.apply ? 'applied' : 'planned', {
+    requested: config.cliUploadGb,
+    label,
+    response: result,
   });
 }
 
@@ -993,6 +1149,16 @@ function printSummary(summary, config) {
 async function run() {
   const config = buildConfig();
 
+  if (config.help) {
+    printUsage();
+    return;
+  }
+
+  const supportedCommands = new Set(['auto', 'status', 'snapshot', 'donate', 'vip', 'upload']);
+  if (!supportedCommands.has(config.command)) {
+    throw new Error(`Unknown command '${config.command}'. Use --help for usage.`);
+  }
+
   if (!config.email || !config.password) {
     throw new Error('Missing credentials. Set MAM_EMAIL (or MAM_USERNAME) and MAM_PASSWORD in .env.');
   }
@@ -1034,6 +1200,41 @@ async function run() {
     if (config.snapshotOnly) {
       const snapshot = await buildLiveSnapshot(page, config, before.value);
       printSummary(snapshot, config);
+      return;
+    }
+
+    if (config.command === 'donate' || config.command === 'vip' || config.command === 'upload') {
+      let result;
+      if (config.command === 'donate') {
+        result = await performDonateDirect(page, config);
+      } else if (config.command === 'vip') {
+        result = await performVipDirect(page, config);
+      } else {
+        result = await performUploadDirect(page, config);
+      }
+
+      let endingBonus = null;
+      let endingBonusEvidence = [];
+      try {
+        await openStore(page, config);
+        const ending = await readCurrentBonus(page);
+        endingBonus = ending.value;
+        endingBonusEvidence = ending.evidence;
+      } catch {
+        // Best effort only; command result already has action details.
+      }
+
+      printSummary(
+        {
+          command: config.command,
+          mode: config.apply ? 'apply' : 'dry-run',
+          startingBonus: before.value,
+          endingBonus,
+          endingBonusEvidence,
+          result,
+        },
+        config,
+      );
       return;
     }
 
