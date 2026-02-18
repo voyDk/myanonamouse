@@ -254,13 +254,19 @@ async function readBonusPoints(page) {
     .map((c) => {
       const l = c.line.toLowerCase();
       let rank = 0;
+      if (l.includes('current bonus points')) rank += 20;
+      if (l.includes('bonus:')) rank += 8;
+      if (l.includes('current') && (l.includes('bonus') || l.includes('seedbonus') || l.includes('karma'))) rank += 6;
       if (l.includes('bonus points')) rank += 4;
       if (l.includes('seedbonus')) rank += 3;
       if (l.includes('karma')) rank += 2;
       if (l.includes('you have')) rank += 1;
+      if (l.includes('buy') && l.includes('for')) rank -= 8;
+      if (l.includes('seedtime fix')) rank -= 8;
+      if (l.includes('guide') || l.includes('faq')) rank -= 3;
       return { ...c, rank };
     })
-    .sort((a, b) => b.rank - a.rank || b.value - a.value);
+    .sort((a, b) => b.rank - a.rank || a.value - b.value);
 
   const picked = priority[0];
   return {
