@@ -1,3 +1,3 @@
-# app
+# myanonamouse
 
-New app repository.
+New app repository for MyAnonamouse.
