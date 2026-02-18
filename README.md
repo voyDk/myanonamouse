@@ -1,56 +1,66 @@
 # myanonamouse
 
-Automates MyAnonamouse bonus-point management with this order:
-1. Donate to Millionaire's Club (if not already donated).
-2. Extend VIP.
-3. Spend remaining points on upload credit.
+Nx monorepo using Bun with:
+- React + TypeScript
+- Vite
+- strict TypeScript settings
+- Bulletproof-style folder layout
 
-The script runs in `dry-run` mode by default and only performs real spending with `--apply`.
-
-## Setup
+## Tooling
 
 ```bash
-npm install
-npx playwright install chromium
-cp .env.example .env
+bun install
 ```
 
-Add your credentials in `.env`:
+## React app
+
+Run the UI:
+
+```bash
+bun run dev
+```
+
+Other tasks:
+
+```bash
+bun run lint
+bun run test
+bun run build
+```
+
+## Frontend architecture
+
+The React app lives in `web/src` and follows a Bulletproof-inspired structure:
+
+```text
+web/src
+  app/          # providers + router entry
+  config/       # env parsing and app config
+  features/     # feature slices (bonus, spending-plan)
+  pages/        # route-level pages
+  shared/       # shared UI, layouts, utilities
+```
+
+## Automation script
+
+Browser automation for MyAnonamouse spending rules remains available:
+
+```bash
+bun run mam:check   # dry-run
+bun run mam:apply   # real spend
+bun run mam:headed  # visible browser
+```
+
+Order used by the script:
+1. Millionaire's Club donation
+2. VIP extension
+3. Upload credit exchange
+
+## Environment
+
+Create `.env` from `.env.example` and set credentials:
 
 ```env
 MAM_EMAIL=you@example.com
 MAM_PASSWORD=your_password
 ```
-
-## Run
-
-Dry-run (recommended first):
-
-```bash
-npm run mam:check
-```
-
-Real spend mode:
-
-```bash
-npm run mam:apply
-```
-
-Visible browser mode for debugging:
-
-```bash
-npm run mam:headed
-```
-
-## Key config
-
-- `MAM_BONUS_THRESHOLD`: spend when bonus is at or above this value (default `98000`).
-- `MAM_BONUS_TARGET`: try to bring bonus down toward this value (default `90000`).
-- `MAM_DONATE_POINTS`: donation amount for Millionaire's Club step (default `2000`).
-- `MAM_MIN_UPLOAD_SPEND`: minimum leftover before trying upload-credit step (default `500`).
-
-## Notes
-
-- Debug artifacts (HTML, screenshot, form discovery JSON) are saved under `debug/` after each run.
-- If page structure changes, run `mam:headed` and inspect the latest `debug/*/forms.json` for selector tuning.
-- Interactions are humanized by default (slower typing, hover-before-click, randomized pauses). Keep `MAM_HUMANIZE=true` unless you are debugging speed issues.
