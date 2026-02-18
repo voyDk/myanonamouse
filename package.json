@@ -1,0 +1,27 @@
+{
+  "name": "myanonamouse",
+  "version": "1.0.0",
+  "description": "Automation helper for MyAnonamouse bonus-point management.",
+  "main": "src/mam-bonus-manager.mjs",
+  "scripts": {
+    "mam:check": "node src/mam-bonus-manager.mjs",
+    "mam:apply": "node src/mam-bonus-manager.mjs --apply",
+    "mam:headed": "node src/mam-bonus-manager.mjs --headed"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/voyDk/myanonamouse.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/voyDk/myanonamouse/issues"
+  },
+  "homepage": "https://github.com/voyDk/myanonamouse#readme",
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "playwright": "^1.58.2"
+  }
+}
