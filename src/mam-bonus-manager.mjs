@@ -38,6 +38,13 @@ function numberFromText(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function randomInt(min, max) {
+  if (max <= min) {
+    return min;
+  }
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
 function buildConfig() {
   const args = new Set(process.argv.slice(2));
   const apply = args.has('--apply') || parseBool(process.env.MAM_APPLY, false);
@@ -57,11 +64,73 @@ function buildConfig() {
     minUploadSpend: parseIntStrict(process.env.MAM_MIN_UPLOAD_SPEND, 500),
     timeoutMs: parseIntStrict(process.env.MAM_TIMEOUT_MS, 45000),
     debugDir: process.env.MAM_DEBUG_DIR || './debug',
+    humanize: parseBool(process.env.MAM_HUMANIZE, true),
+    humanDelayMinMs: parseIntStrict(process.env.MAM_HUMAN_DELAY_MIN_MS, 350),
+    humanDelayMaxMs: parseIntStrict(process.env.MAM_HUMAN_DELAY_MAX_MS, 1300),
+    typeDelayMinMs: parseIntStrict(process.env.MAM_TYPE_DELAY_MIN_MS, 60),
+    typeDelayMaxMs: parseIntStrict(process.env.MAM_TYPE_DELAY_MAX_MS, 140),
+    preClickHoverMinMs: parseIntStrict(process.env.MAM_PRE_CLICK_HOVER_MIN_MS, 140),
+    preClickHoverMaxMs: parseIntStrict(process.env.MAM_PRE_CLICK_HOVER_MAX_MS, 420),
+    slowMoMs: parseIntStrict(process.env.MAM_SLOW_MO_MS, 45),
   };
 }
 
 function actionResult(name, status, extra = {}) {
   return { name, status, ...extra };
+}
+
+async function humanPause(page, config, minMs = null, maxMs = null) {
+  const lower = Number.isFinite(minMs) ? minMs : config.humanDelayMinMs;
+  const upper = Number.isFinite(maxMs) ? maxMs : config.humanDelayMaxMs;
+  const delay = config.humanize ? randomInt(lower, upper) : 20;
+  await page.waitForTimeout(delay);
+}
+
+async function humanType(page, locator, value, config) {
+  await locator.scrollIntoViewIfNeeded().catch(() => {});
+  await locator.click({ delay: config.humanize ? randomInt(60, 180) : 20 });
+  await humanPause(page, config, 120, 360);
+
+  await locator.fill('');
+  if (!config.humanize) {
+    await locator.fill(String(value));
+    return;
+  }
+
+  const text = String(value ?? '');
+  for (const char of text) {
+    const delay = randomInt(config.typeDelayMinMs, config.typeDelayMaxMs);
+    await locator.type(char, { delay });
+  }
+}
+
+async function humanClick(page, locator, config, clickOptions = {}) {
+  await locator.scrollIntoViewIfNeeded().catch(() => {});
+  await humanPause(page, config, 140, 480);
+
+  if (config.humanize) {
+    const box = await locator.boundingBox().catch(() => null);
+    if (box) {
+      const xPadMax = Math.max(2, Math.floor(box.width) - 2);
+      const yPadMax = Math.max(2, Math.floor(box.height) - 2);
+      const xOffset = xPadMax > 2 ? randomInt(2, xPadMax) : Math.floor(box.width / 2);
+      const yOffset = yPadMax > 2 ? randomInt(2, yPadMax) : Math.floor(box.height / 2);
+      const x = box.x + xOffset;
+      const y = box.y + yOffset;
+      await page.mouse.move(x, y, { steps: randomInt(7, 20) });
+      await page.waitForTimeout(randomInt(config.preClickHoverMinMs, config.preClickHoverMaxMs));
+    }
+  }
+
+  await locator.click({
+    delay: config.humanize ? randomInt(60, 220) : 20,
+    ...clickOptions,
+  });
+}
+
+async function humanNavigate(page, url, config) {
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.timeoutMs });
+  await humanPause(page, config, 180, 700);
 }
 
 async function waitForPageToSettle(page) {
@@ -75,14 +144,11 @@ async function waitForPageToSettle(page) {
 }
 
 async function ensureLoggedIn(page, config) {
-  await page.goto(config.loginUrl, { waitUntil: 'domcontentloaded', timeout: config.timeoutMs });
+  await humanNavigate(page, config.loginUrl, config);
 
   const loginForm = page.locator("form[action='/takelogin.php']").first();
   if (!(await loginForm.count())) {
-    await page.goto('https://www.myanonamouse.net/login.php?returnto=%2Fstore.php', {
-      waitUntil: 'domcontentloaded',
-      timeout: config.timeoutMs,
-    });
+    await humanNavigate(page, 'https://www.myanonamouse.net/login.php?returnto=%2Fstore.php', config);
   }
 
   const emailInput = page.locator("input[name='email']").first();
@@ -92,12 +158,18 @@ async function ensureLoggedIn(page, config) {
     throw new Error('Could not find login fields (email/password).');
   }
 
-  await emailInput.fill(config.email);
-  await passwordInput.fill(config.password);
+  await humanType(page, emailInput, config.email, config);
+  await humanPause(page, config, 180, 520);
+  await humanType(page, passwordInput, config.password, config);
+  await humanPause(page, config, 250, 900);
 
   const rememberMe = page.locator("input[name='rememberMe']");
   if (await rememberMe.count()) {
-    await rememberMe.check().catch(() => {});
+    const checked = await rememberMe.isChecked().catch(() => true);
+    if (!checked) {
+      await humanClick(page, rememberMe, config);
+      await humanPause(page, config, 120, 320);
+    }
   }
 
   const submitBtn = page
@@ -110,10 +182,11 @@ async function ensureLoggedIn(page, config) {
 
   await Promise.all([
     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: config.timeoutMs }).catch(() => null),
-    submitBtn.click(),
+    humanClick(page, submitBtn, config),
   ]);
 
   await waitForPageToSettle(page);
+  await humanPause(page, config, 300, 1000);
 
   const stillOnLogin = page.url().includes('/login.php') || (await page.locator("input[name='password']").count()) > 0;
   if (stillOnLogin) {
@@ -127,8 +200,9 @@ async function ensureLoggedIn(page, config) {
 }
 
 async function openStore(page, config) {
-  await page.goto(config.storeUrl, { waitUntil: 'domcontentloaded', timeout: config.timeoutMs });
+  await humanNavigate(page, config.storeUrl, config);
   await waitForPageToSettle(page);
+  await humanPause(page, config, 220, 720);
 
   if (page.url().includes('/login.php')) {
     throw new Error('Session is not authenticated when opening /store.php.');
@@ -263,169 +337,177 @@ function pickBestForm(forms, sectionKeywords, actionKeywords) {
   return bestScore < 0 ? null : best;
 }
 
-async function submitFormAction(page, formIndex, opts) {
+async function submitFormAction(page, formIndex, opts, config) {
   const formLocator = page.locator('form').nth(formIndex);
 
   if (!(await formLocator.count())) {
     return { ok: false, message: `Form at index ${formIndex} not found anymore.` };
   }
 
-  const result = await formLocator.evaluate(
-    (form, options) => {
-      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const parseNumber = (value) => {
-        const digits = String(value || '').replace(/[^0-9]/g, '');
-        if (!digits) return null;
-        const parsed = Number.parseInt(digits, 10);
-        return Number.isFinite(parsed) ? parsed : null;
-      };
+  const formSnapshot = await formLocator.evaluate((form) => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const parseNumber = (value) => {
+      const digits = String(value || '').replace(/[^0-9]/g, '');
+      if (!digits) return null;
+      const parsed = Number.parseInt(digits, 10);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
 
-      const buttons = Array.from(form.querySelectorAll("button, input[type='submit'], input[type='button']"));
-      const buttonMeta = buttons.map((node, idx) => ({
-        index: idx,
+    const buttons = Array.from(form.querySelectorAll("button, input[type='submit'], input[type='button']")).map(
+      (node, index) => ({
+        index,
         label: normalize(node.getAttribute('value') || node.getAttribute('aria-label') || node.textContent || ''),
-      }));
+      }),
+    );
 
-      const inputNodes = Array.from(form.querySelectorAll("input[type='number'], input[type='text']"));
-      const selectNodes = Array.from(form.querySelectorAll('select'));
+    const inputs = Array.from(form.querySelectorAll("input[type='number'], input[type='text']")).map(
+      (node, index) => {
+        const name = normalize(node.getAttribute('name'));
+        const id = normalize(node.getAttribute('id'));
+        const placeholder = normalize(node.getAttribute('placeholder'));
+        return {
+          index,
+          name,
+          id,
+          placeholder,
+          key: `${name} ${id} ${placeholder}`.toLowerCase(),
+        };
+      },
+    );
 
-      const setAmountOnInput = (amount) => {
-        const candidates = inputNodes
-          .map((node) => {
-            const name = normalize(node.getAttribute('name'));
-            const id = normalize(node.getAttribute('id'));
-            const placeholder = normalize(node.getAttribute('placeholder'));
-            const joined = `${name} ${id} ${placeholder}`.toLowerCase();
-            let score = 0;
-            if (joined.includes('point')) score += 5;
-            if (joined.includes('bonus')) score += 4;
-            if (joined.includes('amount')) score += 3;
-            if (joined.includes('vip')) score += 2;
-            if (joined.includes('week')) score += 1;
-            return { node, score, name: joined };
-          })
-          .sort((a, b) => b.score - a.score);
-
-        const best = candidates[0];
-        if (!best) {
-          return null;
-        }
-        best.node.value = String(amount);
-        best.node.dispatchEvent(new Event('input', { bubbles: true }));
-        best.node.dispatchEvent(new Event('change', { bubbles: true }));
-        return { type: 'input', field: best.name, amount };
-      };
-
-      const setAmountOnSelect = (amount) => {
-        const scoredSelects = selectNodes
-          .map((node) => {
-            const name = normalize(node.getAttribute('name'));
-            const id = normalize(node.getAttribute('id'));
-            const joined = `${name} ${id}`.toLowerCase();
-            let score = 0;
-            if (joined.includes('vip')) score += 4;
-            if (joined.includes('week')) score += 3;
-            if (joined.includes('point')) score += 2;
-            if (joined.includes('bonus')) score += 2;
-            return { node, score, name: joined };
-          })
-          .sort((a, b) => b.score - a.score);
-
-        const bestSelect = scoredSelects[0];
-        if (!bestSelect) {
-          return null;
-        }
-
-        const options = Array.from(bestSelect.node.options).map((opt) => ({
+    const selects = Array.from(form.querySelectorAll('select')).map((node, index) => {
+      const name = normalize(node.getAttribute('name'));
+      const id = normalize(node.getAttribute('id'));
+      return {
+        index,
+        name,
+        id,
+        key: `${name} ${id}`.toLowerCase(),
+        options: Array.from(node.options).map((opt) => ({
           value: opt.value,
           text: normalize(opt.textContent || ''),
           n: parseNumber(opt.textContent || opt.value || ''),
           disabled: opt.disabled,
-        }));
-
-        const numericOptions = options.filter((opt) => opt.n !== null && !opt.disabled);
-        if (!numericOptions.length) {
-          return null;
-        }
-
-        let picked = numericOptions
-          .filter((opt) => opt.n <= amount)
-          .sort((a, b) => b.n - a.n)[0];
-
-        if (!picked) {
-          picked = numericOptions.sort((a, b) => a.n - b.n)[0];
-        }
-
-        bestSelect.node.value = picked.value;
-        bestSelect.node.dispatchEvent(new Event('input', { bubbles: true }));
-        bestSelect.node.dispatchEvent(new Event('change', { bubbles: true }));
-
-        return {
-          type: 'select',
-          field: bestSelect.name,
-          amount,
-          option: { text: picked.text, value: picked.value, numeric: picked.n },
-        };
+        })),
       };
+    });
 
-      let amountSet = null;
-      if (Number.isFinite(options.pointsHint) && options.pointsHint > 0) {
-        amountSet = setAmountOnInput(options.pointsHint) || setAmountOnSelect(options.pointsHint) || null;
+    return { buttons, inputs, selects };
+  });
+
+  let amountSet = null;
+  if (Number.isFinite(opts.pointsHint) && opts.pointsHint > 0) {
+    const scoredInputs = formSnapshot.inputs
+      .map((input) => {
+        let score = 0;
+        if (input.key.includes('point')) score += 5;
+        if (input.key.includes('bonus')) score += 4;
+        if (input.key.includes('amount')) score += 3;
+        if (input.key.includes('vip')) score += 2;
+        if (input.key.includes('week')) score += 1;
+        return { ...input, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    const pickedInput = scoredInputs[0];
+    if (pickedInput && (pickedInput.score > 0 || formSnapshot.inputs.length === 1)) {
+      amountSet = { type: 'input', field: pickedInput.key, amount: opts.pointsHint };
+      if (opts.apply) {
+        const inputLocator = formLocator.locator("input[type='number'], input[type='text']").nth(pickedInput.index);
+        await humanType(page, inputLocator, opts.pointsHint, config);
+        await humanPause(page, config, 140, 440);
       }
+    } else {
+      const scoredSelects = formSnapshot.selects
+        .map((sel) => {
+          let score = 0;
+          if (sel.key.includes('vip')) score += 4;
+          if (sel.key.includes('week')) score += 3;
+          if (sel.key.includes('point')) score += 2;
+          if (sel.key.includes('bonus')) score += 2;
+          return { ...sel, score };
+        })
+        .sort((a, b) => b.score - a.score);
 
-      const labelMatches = (label) => {
-        const l = normalize(label).toLowerCase();
-        return options.actionKeywords.some((keyword) => l.includes(keyword));
-      };
+      const pickedSelect = scoredSelects[0];
+      if (pickedSelect) {
+        const numericOptions = pickedSelect.options.filter((opt) => opt.n !== null && !opt.disabled);
+        if (numericOptions.length > 0) {
+          let pickedOption = numericOptions
+            .filter((opt) => opt.n <= opts.pointsHint)
+            .sort((a, b) => b.n - a.n)[0];
+          if (!pickedOption) {
+            pickedOption = numericOptions.sort((a, b) => a.n - b.n)[0];
+          }
 
-      let chosenButton = null;
-      for (let i = 0; i < buttonMeta.length; i += 1) {
-        if (labelMatches(buttonMeta[i].label)) {
-          chosenButton = { ...buttonMeta[i], idx: i };
-          break;
+          amountSet = {
+            type: 'select',
+            field: pickedSelect.key,
+            amount: opts.pointsHint,
+            option: { text: pickedOption.text, value: pickedOption.value, numeric: pickedOption.n },
+          };
+
+          if (opts.apply) {
+            const selectLocator = formLocator.locator('select').nth(pickedSelect.index);
+            await selectLocator.scrollIntoViewIfNeeded().catch(() => {});
+            await humanPause(page, config, 120, 380);
+            await selectLocator.selectOption(pickedOption.value);
+            await humanPause(page, config, 140, 440);
+          }
         }
       }
-
-      if (!chosenButton && buttonMeta.length > 0) {
-        chosenButton = { ...buttonMeta[0], idx: 0 };
-      }
-
-      if (!chosenButton) {
-        return {
-          ok: false,
-          message: 'No submit/button controls found in selected form.',
-          availableButtons: buttonMeta,
-          amountSet,
-        };
-      }
-
-      if (options.apply) {
-        buttons[chosenButton.idx].click();
-      }
-
-      return {
-        ok: true,
-        applied: Boolean(options.apply),
-        chosenButton: chosenButton.label,
-        amountSet,
-        availableButtons: buttonMeta,
-      };
-    },
-    {
-      apply: opts.apply,
-      pointsHint: opts.pointsHint,
-      actionKeywords: opts.actionKeywords,
-    },
-  );
-
-  if (opts.apply && result?.ok) {
-    await waitForPageToSettle(page);
+    }
   }
 
-  return result;
+  const labelMatches = (label) => {
+    const l = String(label || '').toLowerCase();
+    return opts.actionKeywords.some((keyword) => l.includes(keyword));
+  };
+
+  let chosenButton = null;
+  for (const button of formSnapshot.buttons) {
+    if (labelMatches(button.label)) {
+      chosenButton = button;
+      break;
+    }
+  }
+  if (!chosenButton && formSnapshot.buttons.length > 0) {
+    chosenButton = formSnapshot.buttons[0];
+  }
+
+  if (!chosenButton) {
+    return {
+      ok: false,
+      message: 'No submit/button controls found in selected form.',
+      availableButtons: formSnapshot.buttons,
+      amountSet,
+    };
+  }
+
+  if (opts.apply) {
+    const buttonLocator = formLocator
+      .locator("button, input[type='submit'], input[type='button']")
+      .nth(chosenButton.index);
+
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: config.timeoutMs }).catch(() => null),
+      humanClick(page, buttonLocator, config),
+    ]);
+
+    await waitForPageToSettle(page);
+    await humanPause(page, config, 260, 860);
+  }
+
+  return {
+    ok: true,
+    applied: Boolean(opts.apply),
+    chosenButton: chosenButton.label,
+    amountSet,
+    availableButtons: formSnapshot.buttons,
+  };
 }
 
-async function performAction(page, forms, spec, apply, pointsHint) {
+async function performAction(page, forms, spec, apply, pointsHint, config) {
   const picked = pickBestForm(forms, spec.sectionKeywords, spec.actionKeywords);
   if (!picked) {
     return actionResult(spec.name, 'skipped', {
@@ -437,7 +519,7 @@ async function performAction(page, forms, spec, apply, pointsHint) {
     apply,
     pointsHint,
     actionKeywords: spec.actionKeywords,
-  });
+  }, config);
 
   if (!submission?.ok) {
     return actionResult(spec.name, 'failed', {
@@ -488,10 +570,14 @@ async function run() {
     threshold: config.bonusThreshold,
     target: config.bonusTarget,
     cap: config.bonusCap,
+    interactionProfile: config.humanize ? 'humanized' : 'fast',
     actions: [],
   };
 
-  const browser = await chromium.launch({ headless: config.headless });
+  const browser = await chromium.launch({
+    headless: config.headless,
+    slowMo: config.humanize ? config.slowMoMs : 0,
+  });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
   });
@@ -547,6 +633,7 @@ async function run() {
         },
         config.apply,
         donationSpend,
+        config,
       );
       summary.actions.push(donation);
 
@@ -571,6 +658,7 @@ async function run() {
         },
         config.apply,
         remainingToSpend,
+        config,
       );
       summary.actions.push(vip);
 
@@ -597,6 +685,7 @@ async function run() {
         },
         config.apply,
         remainingToSpend,
+        config,
       );
       summary.actions.push(upload);
     } else {

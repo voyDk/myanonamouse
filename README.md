@@ -53,3 +53,4 @@ npm run mam:headed
 
 - Debug artifacts (HTML, screenshot, form discovery JSON) are saved under `debug/` after each run.
 - If page structure changes, run `mam:headed` and inspect the latest `debug/*/forms.json` for selector tuning.
+- Interactions are humanized by default (slower typing, hover-before-click, randomized pauses). Keep `MAM_HUMANIZE=true` unless you are debugging speed issues.
