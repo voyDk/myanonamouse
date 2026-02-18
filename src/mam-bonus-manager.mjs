@@ -275,6 +275,350 @@ async function readBonusPoints(page) {
   };
 }
 
+function normalizeText(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+async function readCurrentBonus(page) {
+  const bonusElText = await page.locator('#currentBonusPoints').first().textContent().catch(() => null);
+  const bonusFromElement = numberFromText(bonusElText);
+  if (bonusFromElement !== null) {
+    return {
+      value: bonusFromElement,
+      evidence: [{ value: bonusFromElement, line: `#currentBonusPoints: ${normalizeText(bonusElText)}`, rank: 100 }],
+    };
+  }
+  return readBonusPoints(page);
+}
+
+async function readDonationHistory(page) {
+  const rows = await page.$$eval('table tr', (trs) => {
+    const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    return trs.map((tr) => Array.from(tr.querySelectorAll('th,td')).map((c) => clean(c.textContent || '')));
+  });
+
+  const parsed = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (row.length >= 2 && /date/i.test(row[0]) && /amount/i.test(row[1])) {
+      for (let j = i + 1; j < rows.length; j += 1) {
+        const r = rows[j];
+        if (r.length < 2 || !r[0] || !r[1]) {
+          continue;
+        }
+        parsed.push({ date: r[0], amount: r[1] });
+      }
+      break;
+    }
+  }
+
+  return parsed;
+}
+
+async function getMillionaireStatus(page, config) {
+  await humanNavigate(page, 'https://www.myanonamouse.net/millionaires/pot.php', config);
+  await waitForPageToSettle(page);
+
+  const bodyText = await getBodyText(page);
+  const lower = bodyText.toLowerCase();
+  const canDonateToday = lower.includes('you have not donated today');
+  const alreadyDonatedToday = lower.includes('you have donated today') || lower.includes('already donated today');
+  const maxMatch = bodyText.match(/currently donate\s+([0-9,]+)/i);
+  const maxDonateToday = maxMatch ? numberFromText(maxMatch[1]) : null;
+
+  const donateButton = page
+    .locator("input[type='submit'][value*='Donate to the pot now'], button:has-text('Donate to the pot now')")
+    .first();
+
+  return {
+    canDonateToday,
+    alreadyDonatedToday,
+    maxDonateToday,
+    donateButtonAvailable: (await donateButton.count()) > 0,
+    donationHistory: await readDonationHistory(page),
+  };
+}
+
+async function openMillionaireDonatePage(page, config) {
+  const donateButton = page
+    .locator("input[type='submit'][value*='Donate to the pot now'], button:has-text('Donate to the pot now')")
+    .first();
+
+  if (await donateButton.count()) {
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: config.timeoutMs }).catch(() => null),
+      humanClick(page, donateButton, config),
+    ]);
+    await waitForPageToSettle(page);
+  }
+
+  if (!page.url().includes('/millionaires/donate.php')) {
+    await humanNavigate(page, 'https://www.myanonamouse.net/millionaires/donate.php', config);
+    await waitForPageToSettle(page);
+  }
+}
+
+async function readDialogMessage(page) {
+  const dialog = page.locator('#dialog-message').first();
+  const visible = await dialog.isVisible().catch(() => false);
+  if (!visible) {
+    return '';
+  }
+  return normalizeText(await dialog.innerText().catch(() => ''));
+}
+
+async function clickDialogButton(page, config, preferredLabels) {
+  for (const label of preferredLabels) {
+    const button = page.locator(`.ui-dialog-buttonpane button:has-text('${label}')`).first();
+    if (await button.count()) {
+      await humanClick(page, button, config);
+      return true;
+    }
+  }
+
+  const fallback = page.locator('.ui-dialog-buttonpane button').first();
+  if (await fallback.count()) {
+    await humanClick(page, fallback, config);
+    return true;
+  }
+
+  return false;
+}
+
+async function triggerStoreBonusButton(page, config, sectionSelector, buttonLabel, apply) {
+  const button = page.locator(`${sectionSelector} button`, { hasText: buttonLabel }).first();
+  if (!(await button.count())) {
+    return { ok: false, reason: `Button not found: ${buttonLabel}` };
+  }
+
+  if (!apply) {
+    return { ok: true, planned: true, buttonLabel };
+  }
+
+  await humanClick(page, button, config);
+  await humanPause(page, config, 200, 550);
+
+  const confirmText = await readDialogMessage(page);
+  if (!confirmText) {
+    return { ok: false, reason: `No confirmation dialog after clicking ${buttonLabel}` };
+  }
+
+  const responsePromise = page
+    .waitForResponse((response) => response.url().includes('/json/bonusBuy.php'), { timeout: config.timeoutMs })
+    .catch(() => null);
+
+  const clickedYes = await clickDialogButton(page, config, ['Yes', 'OK', 'Ok']);
+  if (!clickedYes) {
+    return { ok: false, reason: `Could not confirm dialog for ${buttonLabel}`, confirmText };
+  }
+
+  const response = await responsePromise;
+  const api = response ? await response.json().catch(() => null) : null;
+
+  await humanPause(page, config, 250, 700);
+  const resultDialog = await readDialogMessage(page);
+  if (resultDialog) {
+    await clickDialogButton(page, config, ['OK', 'Ok', 'Close']).catch(() => {});
+  }
+
+  return {
+    ok: true,
+    applied: true,
+    buttonLabel,
+    confirmText,
+    api,
+    resultDialog,
+  };
+}
+
+function planVipButtons(remainingPoints) {
+  const plan = [];
+  if (remainingPoints >= 15000) {
+    plan.push({ label: '12 Weeks', cost: 15000 });
+  }
+  if (remainingPoints >= 10000) {
+    plan.push({ label: '8 Weeks', cost: 10000 });
+  }
+  if (remainingPoints >= 5000) {
+    plan.push({ label: '4 Weeks', cost: 5000 });
+  }
+  plan.push({ label: 'Max me out!', cost: null });
+
+  return plan.filter((item, idx) => plan.findIndex((x) => x.label === item.label) === idx);
+}
+
+const uploadPurchaseOptions = [
+  { label: '100 GB', cost: 50000 },
+  { label: '50 GB', cost: 25000 },
+  { label: '20 GB', cost: 10000 },
+  { label: '5 GB', cost: 2500 },
+  { label: '2.5 GB', cost: 1250 },
+  { label: '1 GB', cost: 500 },
+];
+
+function planUploadPurchases(remainingPoints) {
+  let rem = Math.max(0, remainingPoints);
+  const plan = [];
+
+  while (rem >= 500 && plan.length < 30) {
+    const pick = uploadPurchaseOptions.find((opt) => opt.cost <= rem);
+    if (!pick) {
+      break;
+    }
+    plan.push(pick);
+    rem -= pick.cost;
+  }
+
+  return { plan, unspent: rem };
+}
+
+async function performMillionaireDonation(page, config, apply, remainingToSpend) {
+  const status = await getMillionaireStatus(page, config);
+  if (!status.canDonateToday) {
+    return actionResult('donate_millionaires_club', 'skipped', {
+      reason: status.alreadyDonatedToday ? 'Already donated today.' : 'Donation unavailable today.',
+      millionaireStatus: status,
+    });
+  }
+
+  const donateLimit = status.maxDonateToday ?? config.donatePoints;
+  const targetDonation = Math.min(config.donatePoints, donateLimit, Math.max(0, remainingToSpend));
+  if (targetDonation < 100) {
+    return actionResult('donate_millionaires_club', 'skipped', {
+      reason: `Donation target ${targetDonation} is below minimum option (100).`,
+      millionaireStatus: status,
+    });
+  }
+
+  await openMillionaireDonatePage(page, config);
+
+  const donationSelect = page.locator("form[action='/millionaires/donate.php'] select[name='Donation']").first();
+  if (!(await donationSelect.count())) {
+    return actionResult('donate_millionaires_club', 'failed', {
+      reason: 'Donation dropdown was not found on donate page.',
+    });
+  }
+
+  const optionValues = await donationSelect.evaluate((select) =>
+    Array.from(select.options)
+      .map((opt) => {
+        const digits = String(opt.value || opt.textContent || '').replace(/[^0-9]/g, '');
+        const n = digits ? Number.parseInt(digits, 10) : null;
+        return Number.isFinite(n) ? n : null;
+      })
+      .filter((v) => v !== null),
+  );
+
+  const sorted = optionValues.sort((a, b) => b - a);
+  const picked = sorted.find((v) => v <= targetDonation);
+  if (!picked) {
+    return actionResult('donate_millionaires_club', 'skipped', {
+      reason: `No donation option <= target (${targetDonation}) was available.`,
+      options: sorted,
+    });
+  }
+
+  if (!apply) {
+    return actionResult('donate_millionaires_club', 'planned', {
+      donationPoints: picked,
+      maxDonateToday: status.maxDonateToday,
+    });
+  }
+
+  await donationSelect.scrollIntoViewIfNeeded().catch(() => {});
+  await humanPause(page, config, 120, 360);
+  await donationSelect.selectOption(String(picked));
+  await humanPause(page, config, 120, 360);
+
+  const submitButton = page.locator("form[action='/millionaires/donate.php'] input[type='submit'][name='submit']").first();
+  if (!(await submitButton.count())) {
+    return actionResult('donate_millionaires_club', 'failed', { reason: 'Donation submit button not found.' });
+  }
+
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: config.timeoutMs }).catch(() => null),
+    humanClick(page, submitButton, config),
+  ]);
+  await waitForPageToSettle(page);
+
+  const after = await getMillionaireStatus(page, config);
+  return actionResult('donate_millionaires_club', 'applied', {
+    donationPoints: picked,
+    postStatus: after,
+  });
+}
+
+async function performVipSpend(page, config, apply, remainingToSpend) {
+  const vipPlan = planVipButtons(remainingToSpend);
+  if (!vipPlan.length) {
+    return actionResult('extend_vip', 'skipped', { reason: 'No VIP purchase options were planned.' });
+  }
+
+  if (!apply) {
+    return actionResult('extend_vip', 'planned', { candidates: vipPlan });
+  }
+
+  await openStore(page, config);
+  const attempts = [];
+  for (const candidate of vipPlan) {
+    const result = await triggerStoreBonusButton(page, config, '.vipStatusContent', candidate.label, true);
+    attempts.push({ candidate, result });
+    if (result.ok && (!result.api || result.api.success !== false)) {
+      return actionResult('extend_vip', 'applied', {
+        selected: candidate,
+        response: result,
+        attempts,
+      });
+    }
+    await humanPause(page, config, 250, 700);
+  }
+
+  return actionResult('extend_vip', 'failed', {
+    reason: 'No VIP button produced a successful purchase.',
+    attempts,
+  });
+}
+
+async function performUploadSpend(page, config, apply, remainingToSpend) {
+  const planned = planUploadPurchases(remainingToSpend);
+  if (!planned.plan.length) {
+    return actionResult('buy_upload_credit', 'skipped', {
+      reason: `Remaining spend (${remainingToSpend}) is below minimum upload spend (${config.minUploadSpend}).`,
+    });
+  }
+
+  if (!apply) {
+    return actionResult('buy_upload_credit', 'planned', {
+      sequence: planned.plan,
+      estimatedUnspent: planned.unspent,
+    });
+  }
+
+  await openStore(page, config);
+  const attempts = [];
+  for (const step of planned.plan) {
+    const result = await triggerStoreBonusButton(page, config, '.uploadCreditContent', step.label, true);
+    attempts.push({ step, result });
+    if (!result.ok || (result.api && result.api.success === false)) {
+      break;
+    }
+    await humanPause(page, config, 200, 600);
+  }
+
+  const successful = attempts.filter((attempt) => attempt.result.ok && (!attempt.result.api || attempt.result.api.success !== false));
+  if (!successful.length) {
+    return actionResult('buy_upload_credit', 'failed', {
+      reason: 'No upload credit purchase succeeded.',
+      attempts,
+    });
+  }
+
+  return actionResult('buy_upload_credit', 'applied', {
+    successful,
+    attempts,
+  });
+}
+
 async function discoverForms(page) {
   return page.$$eval('form', (forms) => {
     const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -594,7 +938,7 @@ async function run() {
     await ensureLoggedIn(page, config);
     await openStore(page, config);
 
-    const before = await readBonusPoints(page);
+    const before = await readCurrentBonus(page);
     summary.startingBonus = before.value;
     summary.bonusEvidence = before.evidence;
 
@@ -614,86 +958,51 @@ async function run() {
       return;
     }
 
-    let remainingToSpend = Math.max(0, before.value - config.bonusTarget);
+    let currentBonus = before.value;
+    let remainingToSpend = Math.max(0, currentBonus - config.bonusTarget);
 
-    const formsBefore = await discoverForms(page);
-
-    const bodyLower = (await getBodyText(page)).toLowerCase();
-    const alreadyDonated =
-      bodyLower.includes('millionaire') &&
-      (bodyLower.includes('already donated') ||
-        bodyLower.includes('already contributed') ||
-        bodyLower.includes('you have donated'));
-
-    if (alreadyDonated) {
-      summary.actions.push(actionResult('donate_millionaires_club', 'skipped', { reason: 'Appears already donated this cycle.' }));
-    } else {
-      const donationSpend = Math.max(config.donatePoints, Math.min(config.donatePoints, remainingToSpend));
-      const donation = await performAction(
-        page,
-        formsBefore,
-        {
-          name: 'donate_millionaires_club',
-          sectionKeywords: ['millionaire', 'vault', 'pot'],
-          actionKeywords: ['donate', 'contribute'],
-        },
-        config.apply,
-        donationSpend,
-        config,
-      );
-      summary.actions.push(donation);
-
-      if (donation.status === 'applied') {
-        const afterDonation = await readBonusPoints(page);
-        if (afterDonation.value !== null) {
-          summary.afterDonationBonus = afterDonation.value;
-          remainingToSpend = Math.max(0, afterDonation.value - config.bonusTarget);
-        }
+    const donation = await performMillionaireDonation(page, config, config.apply, remainingToSpend);
+    summary.actions.push(donation);
+    if (donation.status === 'applied') {
+      await openStore(page, config);
+      const afterDonation = await readCurrentBonus(page);
+      if (afterDonation.value !== null) {
+        currentBonus = afterDonation.value;
+        summary.afterDonationBonus = currentBonus;
+        remainingToSpend = Math.max(0, currentBonus - config.bonusTarget);
       }
     }
 
-    const formsForVip = await discoverForms(page);
     if (remainingToSpend > 0) {
-      const vip = await performAction(
-        page,
-        formsForVip,
-        {
-          name: 'extend_vip',
-          sectionKeywords: ['vip'],
-          actionKeywords: ['vip', 'extend', 'buy', 'week'],
-        },
-        config.apply,
-        remainingToSpend,
-        config,
-      );
+      const vip = await performVipSpend(page, config, config.apply, remainingToSpend);
       summary.actions.push(vip);
 
       if (vip.status === 'applied') {
-        const afterVip = await readBonusPoints(page);
+        await openStore(page, config);
+        const afterVip = await readCurrentBonus(page);
         if (afterVip.value !== null) {
-          summary.afterVipBonus = afterVip.value;
-          remainingToSpend = Math.max(0, afterVip.value - config.bonusTarget);
+          currentBonus = afterVip.value;
+          summary.afterVipBonus = currentBonus;
+          remainingToSpend = Math.max(0, currentBonus - config.bonusTarget);
         }
       }
     } else {
       summary.actions.push(actionResult('extend_vip', 'skipped', { reason: 'No spend needed after donation step.' }));
     }
 
-    const formsForUpload = await discoverForms(page);
     if (remainingToSpend >= config.minUploadSpend) {
-      const upload = await performAction(
-        page,
-        formsForUpload,
-        {
-          name: 'buy_upload_credit',
-          sectionKeywords: ['upload', 'credit', 'gb'],
-          actionKeywords: ['max', 'upload', 'credit', 'exchange', 'buy'],
-        },
-        config.apply,
-        remainingToSpend,
-        config,
-      );
+      const upload = await performUploadSpend(page, config, config.apply, remainingToSpend);
       summary.actions.push(upload);
+
+      if (upload.status === 'applied') {
+        await openStore(page, config);
+        const afterUpload = await readCurrentBonus(page);
+        if (afterUpload.value !== null) {
+          currentBonus = afterUpload.value;
+          summary.afterUploadBonus = currentBonus;
+          remainingToSpend = Math.max(0, currentBonus - config.bonusTarget);
+        }
+      }
     } else {
       summary.actions.push(
         actionResult('buy_upload_credit', 'skipped', {
@@ -703,7 +1012,7 @@ async function run() {
     }
 
     await openStore(page, config);
-    const finalBonus = await readBonusPoints(page);
+    const finalBonus = await readCurrentBonus(page);
     summary.endingBonus = finalBonus.value;
     summary.endingBonusEvidence = finalBonus.evidence;
 
